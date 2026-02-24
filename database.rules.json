@@ -1,0 +1,41 @@
+{
+  "rules": {
+    "matchmaking": {
+      "$userId": {
+        ".read": true,
+        ".write": "auth != null && auth.uid == $userId"
+      }
+    },
+    "battles": {
+      "$battleId": {
+        ".read": "auth != null && (data.child('player1/id').val() == auth.uid || data.child('player2/id').val() == auth.uid)",
+        ".write": "auth != null && (
+          (!data.exists() && (newData.child('player1/id').val() == auth.uid || newData.child('player2/id').val() == auth.uid))
+          || (data.exists() && (data.child('player1/id').val() == auth.uid || data.child('player2/id').val() == auth.uid))
+        )",
+
+        "player1": {
+          ".validate": "newData.hasChildren(['id', 'username', 'level', 'score'])"
+        },
+        "player2": {
+          ".validate": "newData.hasChildren(['id', 'username', 'level', 'score'])"
+        },
+        "status": {
+          ".validate": "newData.val() == 'waiting' || newData.val() == 'inProgress' || newData.val() == 'completed'"
+        },
+        "questionIds": {
+          ".validate": "newData.isString() || newData.hasChildren()"
+        },
+        "currentQuestionIndex": {
+          ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() <= 4"
+        }
+      }
+    },
+    "widgetData": {
+      "$userId": {
+        ".read": "auth != null && auth.uid == $userId",
+        ".write": "auth != null && auth.uid == $userId"
+      }
+    }
+  }
+}
