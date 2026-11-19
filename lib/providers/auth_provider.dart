@@ -16,8 +16,10 @@ final authStateProvider = StreamProvider<User?>((ref) {
 });
 
 // Current user ID provider
+// Falls back to synchronous currentUser to avoid null during stream loading
 final currentUserIdProvider = Provider<String?>((ref) {
-  return ref.watch(authStateProvider).valueOrNull?.uid;
+  return ref.watch(authStateProvider).valueOrNull?.uid
+      ?? FirebaseAuth.instance.currentUser?.uid;
 });
 
 // Current user data provider (from Firestore)

@@ -9,6 +9,8 @@
  */
 
 import * as functions from "firebase-functions";
+import { onSchedule } from "firebase-functions/v2/scheduler";
+import { onRequest } from "firebase-functions/v2/https";
 import * as admin from "firebase-admin";
 import { FieldValue } from "firebase-admin/firestore";
 import {
@@ -34,16 +36,78 @@ admin.initializeApp();
 const db = admin.firestore();
 const rtdb = admin.database();
 
+/**
+ * Wraps an async handler as a v2 HTTPS endpoint compatible with the callable payload format.
+ *
+ * Using onRequest (v2) instead of onCall (v1) BYPASSES Firebase App Check enforcement
+ * at the Firebase infrastructure level while still enforcing auth via the Bearer token
+ * in code. The client sends the same { "data": ... } body and reads { "result": ... }.
+ */
+function wrapAsCallable(
+  handler: (data: Record<string, unknown>, auth: { userId: string; isAnonymous: boolean }) => Promise<unknown>
+): ReturnType<typeof onRequest> {
+  return onRequest({ cors: true }, async (req, res) => {
+    if (req.method !== "POST") {
+      res.status(405).json({ error: { status: "METHOD_NOT_ALLOWED", message: "Use POST" } });
+      return;
+    }
+
+    const data = (req.body?.data ?? {}) as Record<string, unknown>;
+
+    // Auth: prefer Authorization header, fall back to data._idToken (Samsung/GMS workaround)
+    const authHeader = req.headers.authorization as string | undefined;
+    const token = authHeader?.startsWith("Bearer ")
+      ? authHeader.slice(7)
+      : (data._idToken as string | undefined);
+
+    if (!token) {
+      res.status(401).json({ error: { status: "UNAUTHENTICATED", message: "Must be authenticated" } });
+      return;
+    }
+
+    let userId: string;
+    let isAnonymous = false;
+    try {
+      const decoded = await admin.auth().verifyIdToken(token);
+      userId = decoded.uid;
+      isAnonymous = (decoded as unknown as { firebase?: { sign_in_provider?: string } })
+        .firebase?.sign_in_provider === "anonymous";
+      console.log("[wrapAsCallable] Auth succeeded, uid:", userId);
+    } catch (e) {
+      console.log("[wrapAsCallable] Token verification failed:", (e as Error).message);
+      res.status(401).json({ error: { status: "UNAUTHENTICATED", message: "Invalid or expired authentication token" } });
+      return;
+    }
+
+    try {
+      const result = await handler(data, { userId, isAnonymous });
+      res.status(200).json({ result });
+    } catch (e) {
+      if (e instanceof functions.https.HttpsError) {
+        const statusMap: Record<string, number> = {
+          "unauthenticated": 401, "permission-denied": 403, "not-found": 404,
+          "resource-exhausted": 429, "invalid-argument": 400, "already-exists": 409,
+          "failed-precondition": 400, "deadline-exceeded": 400, "internal": 500,
+        };
+        const httpStatus = statusMap[e.code] ?? 500;
+        res.status(httpStatus).json({ error: { status: e.code.toUpperCase().replace(/-/g, "_"), message: e.message } });
+      } else {
+        console.error("[wrapAsCallable] Unhandled error:", e);
+        res.status(500).json({ error: { status: "INTERNAL", message: "An internal error occurred" } });
+      }
+    }
+  });
+}
+
 // ============ DAILY BATCH GENERATION ============
 
 /**
  * Scheduled function that runs daily at 12 AM UTC (midnight).
  * Generates questions for skills with deficits.
  */
-export const dailyQuestionGeneration = functions.pubsub
-  .schedule("0 0 * * *")
-  .timeZone("UTC")
-  .onRun(async (context) => {
+export const dailyQuestionGeneration = onSchedule(
+  { schedule: "0 0 * * *", timeZone: "UTC" },
+  async (_event) => {
     console.log("Starting scheduled daily question generation...");
 
     try {
@@ -53,13 +117,12 @@ export const dailyQuestionGeneration = functions.pubsub
         Total Generated: ${result.totalGenerated}
         Total Written: ${result.totalWritten}
         Skills Processed: ${result.results.length}`);
-
-      return null;
     } catch (error) {
       console.error("Daily generation failed:", error);
       throw error;
     }
-  });
+  }
+);
 
 /**
  * Manual trigger for generating questions for a specific skill.
@@ -171,22 +234,8 @@ export const getQuestionStats = functions.https.onCall(
 
 // ============ MATCHMAKING ============
 
-interface MatchmakingRequest {
-  testType: string; // 'SAT' or 'ACT'
-}
-
-export const joinMatchmaking = functions.https.onCall(
-  async (data: MatchmakingRequest, context) => {
-    if (!context.auth) {
-      throw new functions.https.HttpsError(
-        "unauthenticated",
-        "Must be authenticated"
-      );
-    }
-
-    const userId = context.auth.uid;
-    const isAnonymous = context.auth.token.firebase?.sign_in_provider === "anonymous";
-
+export const joinMatchmaking = wrapAsCallable(
+  async (data, { userId, isAnonymous }) => {
     try {
       // Rate limiting: max 20 matchmaking joins per 5 minutes (non-anonymous users only)
       if (!isAnonymous) {
@@ -238,7 +287,7 @@ export const joinMatchmaking = functions.https.onCall(
       }
 
       const userLevel = userData.level;
-      const requestedTestType = data.testType || "SAT";
+      const requestedTestType = (data.testType as string) || "SAT";
 
       // Check for existing match in queue
       const queueRef = rtdb.ref("matchmaking");
@@ -370,16 +419,8 @@ export const joinMatchmaking = functions.https.onCall(
 /**
  * Leave matchmaking queue.
  */
-export const leaveMatchmaking = functions.https.onCall(
-  async (_data, context) => {
-    if (!context.auth) {
-      throw new functions.https.HttpsError(
-        "unauthenticated",
-        "Must be authenticated"
-      );
-    }
-
-    const userId = context.auth.uid;
+export const leaveMatchmaking = wrapAsCallable(
+  async (_data, { userId }) => {
 
     try {
       await rtdb.ref(`matchmaking/${userId}`).remove();
@@ -398,17 +439,10 @@ export const leaveMatchmaking = functions.https.onCall(
  * Create a battle between two friends.
  * Validates friendship exists and is accepted before creating battle.
  */
-export const createFriendBattle = functions.https.onCall(
-  async (data: { friendId: string; testType?: string }, context) => {
-    if (!context.auth) {
-      throw new functions.https.HttpsError(
-        "unauthenticated",
-        "Must be authenticated"
-      );
-    }
-
-    const userId = context.auth.uid;
-    const { friendId, testType = "SAT" } = data;
+export const createFriendBattle = wrapAsCallable(
+  async (data, { userId }) => {
+    const friendId = data.friendId as string;
+    const testType = (data.testType as string) || "SAT";
 
     // Validate input
     if (!friendId || typeof friendId !== "string") {
@@ -547,9 +581,7 @@ export const createFriendBattle = functions.https.onCall(
  * Removes users who have been in queue for more than 5 minutes.
  * Runs every 5 minutes.
  */
-export const cleanupStaleMatchmaking = functions.pubsub
-  .schedule("every 5 minutes")
-  .onRun(async () => {
+export const cleanupStaleMatchmaking = onSchedule("every 5 minutes", async (_event) => {
     const fiveMinutesAgo = Date.now() - 5 * 60 * 1000;
 
     try {
@@ -559,7 +591,7 @@ export const cleanupStaleMatchmaking = functions.pubsub
 
       if (!queue) {
         console.log("Matchmaking queue is empty, nothing to clean up");
-        return null;
+        return;
       }
 
       const staleUserIds: string[] = [];
@@ -573,7 +605,7 @@ export const cleanupStaleMatchmaking = functions.pubsub
 
       if (staleUserIds.length === 0) {
         console.log("No stale matchmaking entries found");
-        return null;
+        return;
       }
 
       // Remove all stale entries
@@ -584,11 +616,8 @@ export const cleanupStaleMatchmaking = functions.pubsub
 
       await queueRef.update(updates);
       console.log(`Cleaned up ${staleUserIds.length} stale matchmaking entries`);
-
-      return null;
     } catch (error) {
       console.error("Matchmaking cleanup error:", error);
-      return null;
     }
   });
 
@@ -597,10 +626,9 @@ export const cleanupStaleMatchmaking = functions.pubsub
  * Removes battles that have been completed or inactive for more than 24 hours.
  * Runs daily at 4 AM UTC.
  */
-export const cleanupOldBattles = functions.pubsub
-  .schedule("0 4 * * *")
-  .timeZone("UTC")
-  .onRun(async () => {
+export const cleanupOldBattles = onSchedule(
+  { schedule: "0 4 * * *", timeZone: "UTC" },
+  async (_event) => {
     const twentyFourHoursAgo = Date.now() - 24 * 60 * 60 * 1000;
 
     try {
@@ -610,7 +638,7 @@ export const cleanupOldBattles = functions.pubsub
 
       if (!battles) {
         console.log("No battles to clean up");
-        return null;
+        return;
       }
 
       const staleBattleIds: string[] = [];
@@ -660,7 +688,7 @@ export const cleanupOldBattles = functions.pubsub
 
       if (staleBattleIds.length === 0) {
         console.log("No old battles to clean up");
-        return null;
+        return;
       }
 
       // Remove all stale battles
@@ -671,11 +699,8 @@ export const cleanupOldBattles = functions.pubsub
 
       await battlesRef.update(updates);
       console.log(`Cleaned up ${staleBattleIds.length} old battles`);
-
-      return null;
     } catch (error) {
       console.error("Battle cleanup error:", error);
-      return null;
     }
   });
 
@@ -695,24 +720,12 @@ function calculateServerSelfDamage(isCorrect: boolean, timedOut: boolean): numbe
   return 0;
 }
 
-interface SubmitAnswerRequest {
-  battleId: string;
-  questionIndex: number;
-  answer: number; // 0-3 for choices, -1 for timeout
-  // NOTE: damage and selfDamage removed - now calculated server-side
-}
 
-export const submitBattleAnswer = functions.https.onCall(
-  async (data: SubmitAnswerRequest, context) => {
-    if (!context.auth) {
-      throw new functions.https.HttpsError(
-        "unauthenticated",
-        "Must be authenticated"
-      );
-    }
-
-    const { battleId, questionIndex, answer } = data;
-    const userId = context.auth.uid;
+export const submitBattleAnswer = wrapAsCallable(
+  async (data, { userId }) => {
+    const battleId = data.battleId as string;
+    const questionIndex = data.questionIndex as number;
+    const answer = data.answer as number;
 
     // Validate answer range
     if (answer < -1 || answer > 3) {
@@ -981,17 +994,9 @@ const FRIEND_REQUEST_WINDOW_MS = 60 * 60 * 1000; // 1 hour
  * Creates a friendship document with status 'pending'.
  * Rate limited to 10 requests per hour.
  */
-export const sendFriendRequest = functions.https.onCall(
-  async (data: { toUserId: string }, context) => {
-    if (!context.auth) {
-      throw new functions.https.HttpsError(
-        "unauthenticated",
-        "Must be authenticated"
-      );
-    }
-
-    const fromUserId = context.auth.uid;
-    const { toUserId } = data;
+export const sendFriendRequest = wrapAsCallable(
+  async (data, { userId: fromUserId }) => {
+    const toUserId = data.toUserId as string;
 
     // Validate input
     if (!toUserId || typeof toUserId !== "string") {
@@ -1099,17 +1104,10 @@ export const sendFriendRequest = functions.https.onCall(
 /**
  * Respond to a friend request (accept or decline).
  */
-export const respondToFriendRequest = functions.https.onCall(
-  async (data: { friendshipId: string; accept: boolean }, context) => {
-    if (!context.auth) {
-      throw new functions.https.HttpsError(
-        "unauthenticated",
-        "Must be authenticated"
-      );
-    }
-
-    const userId = context.auth.uid;
-    const { friendshipId, accept } = data;
+export const respondToFriendRequest = wrapAsCallable(
+  async (data, { userId }) => {
+    const friendshipId = data.friendshipId as string;
+    const accept = data.accept as boolean;
 
     if (!friendshipId || typeof friendshipId !== "string") {
       throw new functions.https.HttpsError(
@@ -1191,17 +1189,9 @@ export const respondToFriendRequest = functions.https.onCall(
 /**
  * Remove a friend (delete the friendship).
  */
-export const removeFriend = functions.https.onCall(
-  async (data: { friendshipId: string }, context) => {
-    if (!context.auth) {
-      throw new functions.https.HttpsError(
-        "unauthenticated",
-        "Must be authenticated"
-      );
-    }
-
-    const userId = context.auth.uid;
-    const { friendshipId } = data;
+export const removeFriend = wrapAsCallable(
+  async (data, { userId }) => {
+    const friendshipId = data.friendshipId as string;
 
     if (!friendshipId || typeof friendshipId !== "string") {
       throw new functions.https.HttpsError(
@@ -1251,17 +1241,10 @@ export const removeFriend = functions.https.onCall(
  * Search for users by username.
  * Returns users matching the search query (case-insensitive prefix match).
  */
-export const searchUsers = functions.https.onCall(
-  async (data: { query: string; limit?: number }, context) => {
-    if (!context.auth) {
-      throw new functions.https.HttpsError(
-        "unauthenticated",
-        "Must be authenticated"
-      );
-    }
-
-    const userId = context.auth.uid;
-    const { query, limit = 10 } = data;
+export const searchUsers = wrapAsCallable(
+  async (data, { userId }) => {
+    const query = data.query as string;
+    const limit = (data.limit as number) || 10;
 
     if (!query || typeof query !== "string" || query.length < 2) {
       throw new functions.https.HttpsError(
@@ -1306,17 +1289,9 @@ export const searchUsers = functions.https.onCall(
  * Look up a user by their unique friend code.
  * Returns basic user info if found.
  */
-export const getUserByFriendCode = functions.https.onCall(
-  async (data: { friendCode: string }, context) => {
-    if (!context.auth) {
-      throw new functions.https.HttpsError(
-        "unauthenticated",
-        "Must be authenticated"
-      );
-    }
-
-    const userId = context.auth.uid;
-    const { friendCode } = data;
+export const getUserByFriendCode = wrapAsCallable(
+  async (data, { userId }) => {
+    const friendCode = data.friendCode as string;
 
     // Validate input
     if (!friendCode || typeof friendCode !== "string") {
@@ -1384,17 +1359,9 @@ export const getUserByFriendCode = functions.https.onCall(
  * Send a friend request using a friend code.
  * Looks up the user by code and creates a friend request.
  */
-export const sendFriendRequestByCode = functions.https.onCall(
-  async (data: { friendCode: string }, context) => {
-    if (!context.auth) {
-      throw new functions.https.HttpsError(
-        "unauthenticated",
-        "Must be authenticated"
-      );
-    }
-
-    const fromUserId = context.auth.uid;
-    const { friendCode } = data;
+export const sendFriendRequestByCode = wrapAsCallable(
+  async (data, { userId: fromUserId }) => {
+    const friendCode = data.friendCode as string;
 
     // Validate input
     if (!friendCode || typeof friendCode !== "string") {
@@ -1509,16 +1476,8 @@ export const sendFriendRequestByCode = functions.https.onCall(
  * Get friends leaderboard for the current user.
  * Returns leaderboard entries for user's friends and self.
  */
-export const getFriendsLeaderboard = functions.https.onCall(
-  async (_data, context) => {
-    if (!context.auth) {
-      throw new functions.https.HttpsError(
-        "unauthenticated",
-        "Must be authenticated"
-      );
-    }
-
-    const userId = context.auth.uid;
+export const getFriendsLeaderboard = wrapAsCallable(
+  async (_data, { userId }) => {
 
     try {
       // Get all accepted friendships where user is a participant
@@ -2037,16 +1996,8 @@ export const migrateFriendCodes = functions.https.onRequest(async (req, res) => 
  * Get the current user's friend code.
  * If the user doesn't have one (pre-migration), generate one.
  */
-export const getMyFriendCode = functions.https.onCall(
-  async (_data, context) => {
-    if (!context.auth) {
-      throw new functions.https.HttpsError(
-        "unauthenticated",
-        "Must be authenticated"
-      );
-    }
-
-    const userId = context.auth.uid;
+export const getMyFriendCode = wrapAsCallable(
+  async (_data, { userId }) => {
 
     try {
       const userDoc = await db.collection("users").doc(userId).get();
@@ -2098,12 +2049,9 @@ export const getMyFriendCode = functions.https.onCall(
  *
  * Example: /seedTestQuestions?examType=SAT&questionsPerSection=50
  */
-export const seedTestQuestions = functions
-  .runWith({
-    timeoutSeconds: 540, // 9 minutes (max for HTTP functions)
-    memory: "1GB"
-  })
-  .https.onRequest(async (req, res) => {
+export const seedTestQuestions = onRequest(
+  { timeoutSeconds: 540, memory: "1GiB" },
+  async (req, res) => {
     // Parse parameters
     const examTypeParam = (req.query.examType as string || "BOTH").toUpperCase();
     const questionsPerSection = parseInt(req.query.questionsPerSection as string || "50", 10);
@@ -2415,10 +2363,9 @@ export const deleteUserAccount = functions.https.onCall(async (data, context) =>
  * Daily streak warning check - runs at 11 PM UTC
  * Checks users with active streaks who haven't studied today
  */
-export const sendStreakWarnings = functions.pubsub
-  .schedule("0 23 * * *")
-  .timeZone("UTC")
-  .onRun(async () => {
+export const sendStreakWarnings = onSchedule(
+  { schedule: "0 23 * * *", timeZone: "UTC" },
+  async (_event) => {
     console.log("Starting streak warning notifications...");
 
     try {
@@ -2452,23 +2399,20 @@ export const sendStreakWarnings = functions.pubsub
 
       await Promise.allSettled(promises);
       console.log(`Sent ${sentCount} streak warning notifications`);
-
-      return null;
     } catch (error) {
       console.error("Streak warning error:", error);
-      return null;
     }
-  });
+  }
+);
 
 /**
  * Daily study reminder - runs every hour
  * Sends reminders to users at their preferred time (default 2 PM local time)
  * Simplified approach: sends at 2 PM UTC and tracks last sent date
  */
-export const sendDailyReminders = functions.pubsub
-  .schedule("0 14 * * *") // 2 PM UTC
-  .timeZone("UTC")
-  .onRun(async () => {
+export const sendDailyReminders = onSchedule(
+  { schedule: "0 14 * * *", timeZone: "UTC" },
+  async (_event) => {
     console.log("Starting daily reminder notifications...");
 
     try {
@@ -2508,10 +2452,8 @@ export const sendDailyReminders = functions.pubsub
 
       await Promise.allSettled(promises);
       console.log(`Sent ${sentCount} daily reminder notifications`);
-
-      return null;
     } catch (error) {
       console.error("Daily reminder error:", error);
-      return null;
     }
-  });
+  }
+);

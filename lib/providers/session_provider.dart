@@ -213,6 +213,7 @@ class UserSessionNotifier extends StateNotifier<UserSession?> {
 
   UserSessionNotifier(this._ref) : super(null) {
     _initialize();
+    listenToAuthChanges();
   }
 
   /// Initialize the session based on Firebase Auth and local preferences

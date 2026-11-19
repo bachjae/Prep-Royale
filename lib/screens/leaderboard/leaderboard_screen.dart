@@ -1,7 +1,9 @@
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
+import '../../config/router.dart';
 import '../../config/theme.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/leaderboard_provider.dart';
@@ -37,6 +39,12 @@ class _LeaderboardScreenState extends ConsumerState<LeaderboardScreen>
       final type = _tabController.index == 0
           ? LeaderboardType.global
           : LeaderboardType.friends;
+
+      // Don't trigger friends load while auth is still loading —
+      // avoids unauthenticated Cloud Function calls before auth state is ready
+      if (type == LeaderboardType.friends &&
+          ref.read(currentUserIdProvider) == null) return;
+
       ref.read(leaderboardProvider.notifier).setLeaderboardType(type);
     }
   }
@@ -72,18 +80,24 @@ class _LeaderboardScreenState extends ConsumerState<LeaderboardScreen>
             emptySubtitle: 'Be the first to climb the leaderboard!',
             onRefresh: () => ref.read(leaderboardProvider.notifier).loadGlobalLeaderboard(),
           ),
-          // Friends leaderboard
-          _LeaderboardContent(
-            entries: leaderboardState.friendsEntries,
-            isLoading: leaderboardState.isLoading &&
-                leaderboardState.currentType == LeaderboardType.friends,
-            error: leaderboardState.currentType == LeaderboardType.friends
-                ? leaderboardState.error : null,
-            currentUserId: currentUserId,
-            emptyTitle: 'No friends yet',
-            emptySubtitle: 'Add friends to see how you compare!',
-            onRefresh: () => ref.read(leaderboardProvider.notifier).loadFriendsLeaderboard(),
-          ),
+          // Friends leaderboard - require sign-in
+          if (currentUserId == null)
+            _SignInRequired(
+              message: 'Sign in to see how you rank among your friends.',
+              onSignIn: () => context.go(Routes.login),
+            )
+          else
+            _LeaderboardContent(
+              entries: leaderboardState.friendsEntries,
+              isLoading: leaderboardState.isLoading &&
+                  leaderboardState.currentType == LeaderboardType.friends,
+              error: leaderboardState.currentType == LeaderboardType.friends
+                  ? leaderboardState.error : null,
+              currentUserId: currentUserId,
+              emptyTitle: 'No friends yet',
+              emptySubtitle: 'Add friends to see how you compare!',
+              onRefresh: () => ref.read(leaderboardProvider.notifier).loadFriendsLeaderboard(),
+            ),
         ],
       ),
     );
@@ -306,6 +320,65 @@ class _PodiumItem extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+class _SignInRequired extends StatelessWidget {
+  final String message;
+  final VoidCallback onSignIn;
+
+  const _SignInRequired({required this.message, required this.onSignIn});
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 88,
+              height: 88,
+              decoration: BoxDecoration(
+                color: AppTheme.primaryColor.withValues(alpha: 0.1),
+                shape: BoxShape.circle,
+              ),
+              child: const Icon(
+                Icons.people_outline,
+                size: 44,
+                color: AppTheme.primaryColor,
+              ),
+            ),
+            const SizedBox(height: 20),
+            Text(
+              'Sign In Required',
+              style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                    fontWeight: FontWeight.bold,
+                  ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              message,
+              textAlign: TextAlign.center,
+              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                    color: AppTheme.textSecondary,
+                    height: 1.5,
+                  ),
+            ),
+            const SizedBox(height: 24),
+            SizedBox(
+              width: double.infinity,
+              height: 48,
+              child: ElevatedButton(
+                onPressed: onSignIn,
+                child: const Text('Sign In'),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

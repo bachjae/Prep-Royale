@@ -25,9 +25,15 @@ service cloud.firestore {
         && request.resource.data.keys().hasAll(['email', 'username'])
         && isValidUsername(request.resource.data.username);
       allow update: if isOwner(userId)
-        // Prevent users from modifying server-controlled fields
+        // battleStats/friendCode are server-only (via Cloud Functions)
+        // totalXp and level are written client-side by addXp() in study mode
+        // unlockedAchievements allows only additions (arrayUnion), not removals
         && !request.resource.data.diff(resource.data).affectedKeys()
-          .hasAny(['totalXp', 'level', 'battleStats', 'unlockedAchievements', 'friendCode']);
+          .hasAny(['battleStats', 'friendCode'])
+        && (!request.resource.data.diff(resource.data).affectedKeys()
+            .hasAny(['unlockedAchievements'])
+          || request.resource.data.unlockedAchievements.toSet()
+            .hasAll(resource.data.unlockedAchievements.toSet()));
       allow delete: if false;
 
       // User answers subcollection - tracks answered questions

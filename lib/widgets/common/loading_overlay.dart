@@ -91,7 +91,7 @@ class ErrorDisplay extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Center(
-      child: Padding(
+      child: SingleChildScrollView(
         padding: const EdgeInsets.all(24),
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -148,6 +148,7 @@ class ErrorDisplay extends StatelessWidget {
 }
 
 class EmptyState extends StatelessWidget {
+
   final IconData icon;
   final String title;
   final String? subtitle;

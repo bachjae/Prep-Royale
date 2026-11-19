@@ -1,8 +1,8 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:cloud_functions/cloud_functions.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../providers/auth_provider.dart';
+import '../services/cloud_fn.dart';
 
 enum LeaderboardType { global, friends }
 
@@ -78,7 +78,6 @@ class LeaderboardState {
 class LeaderboardNotifier extends StateNotifier<LeaderboardState> {
   final Ref _ref;
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
-  final FirebaseFunctions _functions = FirebaseFunctions.instance;
 
   LeaderboardNotifier(this._ref) : super(const LeaderboardState());
 
@@ -126,10 +125,10 @@ class LeaderboardNotifier extends StateNotifier<LeaderboardState> {
     state = state.copyWith(isLoading: true, error: null);
 
     try {
-      final callable = _functions.httpsCallable('getFriendsLeaderboard');
-      final result = await callable.call();
+      // Use direct HTTP call to bypass Firebase callable SDK's App Check blocker
+      final result = await callFn('getFriendsLeaderboard');
 
-      final entriesData = result.data['entries'] as List;
+      final entriesData = (result as Map<String, dynamic>)['entries'] as List;
       final entries = entriesData.asMap().entries.map((e) {
         final data = Map<String, dynamic>.from(e.value as Map);
         // Cloud function returns 'odUserId', fallback to 'userId' for compatibility
@@ -145,10 +144,15 @@ class LeaderboardNotifier extends StateNotifier<LeaderboardState> {
       }).toList();
 
       state = state.copyWith(friendsEntries: entries, isLoading: false);
+    } on CloudFnException catch (e) {
+      final message = e.code == 'unauthenticated'
+          ? 'Could not verify your account. Please sign out and sign back in.'
+          : 'Could not load friends leaderboard. Please try again.';
+      state = state.copyWith(isLoading: false, error: message);
     } catch (e) {
       state = state.copyWith(
         isLoading: false,
-        error: 'Failed to load friends leaderboard: $e',
+        error: 'Could not load friends leaderboard. Please try again.',
       );
     }
   }

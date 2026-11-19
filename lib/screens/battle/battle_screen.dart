@@ -157,24 +157,24 @@ class BattleScreen extends ConsumerWidget {
 
             // Question progress
             Padding(
-              padding: const EdgeInsets.all(16),
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
               child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
                 children: List.generate(battle.totalQuestions, (index) {
                   final isCurrent = index == battle.currentQuestionIndex;
                   final isCompleted = index < battle.currentQuestionIndex;
 
-                  return Container(
-                    width: 40,
-                    height: 8,
-                    margin: const EdgeInsets.symmetric(horizontal: 4),
-                    decoration: BoxDecoration(
-                      color: isCompleted
-                          ? AppTheme.successColor
-                          : isCurrent
-                              ? AppTheme.primaryColor
-                              : const Color(0xFFE2E8F0),
-                      borderRadius: BorderRadius.circular(4),
+                  return Expanded(
+                    child: Container(
+                      height: 8,
+                      margin: const EdgeInsets.symmetric(horizontal: 2),
+                      decoration: BoxDecoration(
+                        color: isCompleted
+                            ? AppTheme.successColor
+                            : isCurrent
+                                ? AppTheme.primaryColor
+                                : const Color(0xFFE2E8F0),
+                        borderRadius: BorderRadius.circular(4),
+                      ),
                     ),
                   );
                 }),

@@ -1,6 +1,7 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/question_model.dart';
+import '../services/achievement_service.dart';
 import '../services/firebase_service.dart';
 import '../services/local_stats_service.dart';
 import '../services/widget_service.dart';
@@ -295,6 +296,10 @@ class StudySessionNotifier extends StateNotifier<StudySession?> {
         if (userDoc != null) {
           final streakCount = userDoc.dailyStreak.count;
           widgetService.updateStreakOnly(streakCount);
+
+          // Check and unlock achievements with fresh user data
+          final achievementService = _ref.read(achievementServiceProvider);
+          achievementService.checkAndUnlockAchievements(userDoc);
         }
       } catch (e) {
         // Widget update is non-critical, just log the error
@@ -313,7 +318,7 @@ class StudySessionNotifier extends StateNotifier<StudySession?> {
       );
 
       // Refresh guest stats provider
-      _ref.read(userSessionProvider.notifier).refreshGuestStats();
+      _ref.invalidate(guestStatsProvider);
 
       // Update widget with guest streak (run in background, don't await)
       try {
@@ -359,8 +364,6 @@ class StudySessionNotifier extends StateNotifier<StudySession?> {
   Future<bool> loadMoreQuestions() async {
     if (state == null) return false;
 
-    final oldQuestionCount = state!.questions.length;
-
     await startSession(
       state!.examType,
       state!.section,
@@ -368,9 +371,10 @@ class StudySessionNotifier extends StateNotifier<StudySession?> {
       questionCount: 10,
     );
 
-    // Check if new questions were actually loaded
-    final newQuestionCount = state?.questions.length ?? 0;
-    return newQuestionCount > 0 && newQuestionCount != oldQuestionCount;
+    // Return true whenever questions loaded successfully (no error, non-empty)
+    // Previously compared old vs new count, but both batches are 10 so that
+    // always returned false, ending every session after the first batch.
+    return (state?.questions.isNotEmpty == true) && (state?.error == null);
   }
 
   /// End the current session

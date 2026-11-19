@@ -25,6 +25,7 @@ export interface QuestionDocument {
   skill: string;
   difficulty: string;
   questionText: string;
+  passage?: string; // Optional passage for Reading/Writing/Science/English questions
   choices: string[];
   correctChoiceIndex: number;
   explanation: string;
@@ -116,7 +117,7 @@ export function toFirestoreDocument(
   question: GeneratedQuestion,
   sourceModel: string = "gemini-2.0-flash"
 ): QuestionDocument {
-  return {
+  const doc: QuestionDocument = {
     examType: question.examType,
     section: question.section,
     skill: question.skill,
@@ -129,6 +130,13 @@ export function toFirestoreDocument(
     sourceModel,
     hash: generateQuestionHash(question.questionText)
   };
+
+  // Include passage if present (Reading/Writing/Science/English questions)
+  if (question.passage) {
+    doc.passage = question.passage;
+  }
+
+  return doc;
 }
 
 /**

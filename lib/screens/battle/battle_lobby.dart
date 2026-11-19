@@ -354,9 +354,11 @@ class _RuleItem extends StatelessWidget {
       children: [
         Icon(icon, size: 20, color: AppTheme.primaryColor),
         const SizedBox(width: 12),
-        Text(
-          text,
-          style: Theme.of(context).textTheme.bodyMedium,
+        Expanded(
+          child: Text(
+            text,
+            style: Theme.of(context).textTheme.bodyMedium,
+          ),
         ),
       ],
     );

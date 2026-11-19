@@ -55,6 +55,14 @@
         { "fieldPath": "isCorrect", "order": "ASCENDING" },
         { "fieldPath": "answeredAt", "order": "DESCENDING" }
       ]
+    },
+    {
+      "collectionGroup": "matchmakingLogs",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "userId", "order": "ASCENDING" },
+        { "fieldPath": "timestamp", "order": "ASCENDING" }
+      ]
     }
   ],
   "fieldOverrides": [

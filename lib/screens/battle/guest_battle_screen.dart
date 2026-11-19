@@ -256,7 +256,7 @@ class GuestBattleNotifier extends StateNotifier<GuestBattleState> {
     await localStatsService.updateGuestBattleStats(isWinner: playerWon);
 
     // Refresh guest stats
-    _ref.read(userSessionProvider.notifier).refreshGuestStats();
+    _ref.invalidate(guestStatsProvider);
   }
 
   int _calculateDamage(int timeSpentSeconds) {
@@ -359,12 +359,14 @@ class _GuestBattleScreenState extends ConsumerState<GuestBattleScreen> {
 
           // Question
           Expanded(
-            child: _QuestionWidget(
-              question: battleState.currentQuestion!,
-              onAnswerSelected: (answer) {
-                ref.read(guestBattleProvider.notifier).submitAnswer(answer);
-              },
-            ),
+            child: battleState.currentQuestion == null
+                ? const Center(child: CircularProgressIndicator())
+                : _QuestionWidget(
+                    question: battleState.currentQuestion!,
+                    onAnswerSelected: (answer) {
+                      ref.read(guestBattleProvider.notifier).submitAnswer(answer);
+                    },
+                  ),
           ),
         ],
       ),

@@ -488,12 +488,16 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
     setState(() => _isGoogleLoading = false);
 
     if (result.isSuccess) {
+      // Invalidate providers to ensure fresh data — same as email login
+      ref.invalidate(currentUserProvider);
+      ref.invalidate(userSessionProvider);
+
       if (result.isNewUser) {
         // New user - go to profile setup
-        context.go(Routes.profilePicture);
+        if (mounted) context.go(Routes.profilePicture);
       } else {
         // Existing user - go to home
-        context.go(Routes.home);
+        if (mounted) context.go(Routes.home);
       }
     } else {
       setState(() => _errorMessage = result.errorMessage);

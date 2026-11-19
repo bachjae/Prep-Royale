@@ -1,9 +1,9 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:cloud_functions/cloud_functions.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/friendship_model.dart';
 import '../providers/auth_provider.dart';
+import '../services/cloud_fn.dart';
 
 /// Stream of all accepted friendships for the current user
 final friendshipsStreamProvider = StreamProvider<List<FriendshipModel>>((ref) {
@@ -117,26 +117,22 @@ final friendsWithProfilesProvider =
 /// Friends Leaderboard Provider
 final friendsLeaderboardProvider =
     FutureProvider<List<FriendWithProfile>>((ref) async {
-  final functions = FirebaseFunctions.instance;
   try {
-    final result =
-        await functions.httpsCallable('getFriendsLeaderboard').call();
-    final entries = (result.data['entries'] as List);
+    final result = await callFn('getFriendsLeaderboard');
+    final entries = ((result as Map<String, dynamic>)['entries'] as List);
 
     return entries.map((e) {
       final map = Map<String, dynamic>.from(e);
       return FriendWithProfile(
-        odId: map['odUserId'] ?? '',
+        odId: map['odUserId'] ?? map['userId'] ?? '',
         username: map['username'] ?? '',
         profilePictureUrl: map['profilePictureUrl'],
         level: map['level'] ?? 1,
         totalXp: map['totalXp'] ?? 0,
-        friendshipId:
-            '', // Leaderboard entries don't need a specific friendship ID here
+        friendshipId: '',
       );
     }).toList();
   } catch (e) {
-    print('Failed to get friends leaderboard: $e');
     return [];
   }
 });
@@ -226,8 +222,6 @@ class FriendsState {
 
 /// Notifier for friend operations
 class FriendsNotifier extends StateNotifier<FriendsState> {
-  final FirebaseFunctions _functions = FirebaseFunctions.instance;
-
   FriendsNotifier() : super(const FriendsState());
 
   /// Search for users by username
@@ -240,17 +234,20 @@ class FriendsNotifier extends StateNotifier<FriendsState> {
     state = state.copyWith(isSearching: true, error: null);
 
     try {
-      final callable = _functions.httpsCallable('searchUsers');
-      final result = await callable.call({'query': query, 'limit': 10});
-
-      final users = (result.data['users'] as List)
+      final result = await callFn('searchUsers', {'query': query, 'limit': 10});
+      final users = ((result as Map<String, dynamic>)['users'] as List)
           .map((u) => UserSearchResult.fromMap(Map<String, dynamic>.from(u)))
           .toList();
 
       state = state.copyWith(searchResults: users, isSearching: false);
+    } on CloudFnException catch (e) {
+      state = state.copyWith(
+        error: e.message ?? 'Failed to search users',
+        isSearching: false,
+      );
     } catch (e) {
       state = state.copyWith(
-        error: 'Failed to search users: $e',
+        error: 'Failed to search users',
         isSearching: false,
       );
     }
@@ -266,17 +263,17 @@ class FriendsNotifier extends StateNotifier<FriendsState> {
     state = state.copyWith(isLoading: true, error: null);
 
     try {
-      final callable = _functions.httpsCallable('sendFriendRequest');
-      await callable.call({'toUserId': toUserId});
-
+      await callFn('sendFriendRequest', {'toUserId': toUserId});
       state = state.copyWith(isLoading: false);
       return true;
+    } on CloudFnException catch (e) {
+      state = state.copyWith(
+          isLoading: false,
+          error: e.message ?? 'Failed to send friend request');
+      return false;
     } catch (e) {
-      String errorMessage = 'Failed to send friend request';
-      if (e is FirebaseFunctionsException) {
-        errorMessage = e.message ?? errorMessage;
-      }
-      state = state.copyWith(isLoading: false, error: errorMessage);
+      state = state.copyWith(
+          isLoading: false, error: 'Failed to send friend request');
       return false;
     }
   }
@@ -286,18 +283,22 @@ class FriendsNotifier extends StateNotifier<FriendsState> {
     state = state.copyWith(isLoading: true, error: null);
 
     try {
-      final callable = _functions.httpsCallable('respondToFriendRequest');
-      await callable.call({'friendshipId': friendshipId, 'accept': accept});
-
+      await callFn('respondToFriendRequest',
+          {'friendshipId': friendshipId, 'accept': accept});
       state = state.copyWith(isLoading: false);
       return true;
+    } on CloudFnException catch (e) {
+      state = state.copyWith(
+        isLoading: false,
+        error: e.message ??
+            (accept ? 'Failed to accept request' : 'Failed to decline request'),
+      );
+      return false;
     } catch (e) {
-      String errorMessage =
-          accept ? 'Failed to accept request' : 'Failed to decline request';
-      if (e is FirebaseFunctionsException) {
-        errorMessage = e.message ?? errorMessage;
-      }
-      state = state.copyWith(isLoading: false, error: errorMessage);
+      state = state.copyWith(
+        isLoading: false,
+        error: accept ? 'Failed to accept request' : 'Failed to decline request',
+      );
       return false;
     }
   }
@@ -307,15 +308,13 @@ class FriendsNotifier extends StateNotifier<FriendsState> {
     state = state.copyWith(isLoading: true, error: null);
 
     try {
-      final callable = _functions.httpsCallable('removeFriend');
-      await callable.call({'friendshipId': friendshipId});
-
+      await callFn('removeFriend', {'friendshipId': friendshipId});
       state = state.copyWith(isLoading: false);
       return true;
     } catch (e) {
       state = state.copyWith(
         isLoading: false,
-        error: 'Failed to remove friend: $e',
+        error: 'Failed to remove friend',
       );
       return false;
     }
@@ -333,10 +332,9 @@ class FriendsNotifier extends StateNotifier<FriendsState> {
     state = state.copyWith(isLoadingFriendCode: true, error: null);
 
     try {
-      final callable = _functions.httpsCallable('getMyFriendCode');
-      final result = await callable.call();
-
-      final friendCode = result.data['friendCode'] as String?;
+      final result = await callFn('getMyFriendCode');
+      final friendCode =
+          (result as Map<String, dynamic>)['friendCode'] as String?;
       state = state.copyWith(
         myFriendCode: friendCode,
         isLoadingFriendCode: false,
@@ -344,7 +342,7 @@ class FriendsNotifier extends StateNotifier<FriendsState> {
     } catch (e) {
       state = state.copyWith(
         isLoadingFriendCode: false,
-        error: 'Failed to get friend code: $e',
+        error: 'Failed to get friend code',
       );
     }
   }
@@ -367,11 +365,9 @@ class FriendsNotifier extends StateNotifier<FriendsState> {
     );
 
     try {
-      final callable = _functions.httpsCallable('getUserByFriendCode');
-      final result =
-          await callable.call({'friendCode': friendCode.toUpperCase()});
-
-      final userData = result.data;
+      final result = await callFn(
+          'getUserByFriendCode', {'friendCode': friendCode.toUpperCase()});
+      final userData = result as Map<String, dynamic>?;
       if (userData == null || userData['userId'] == null) {
         state = state.copyWith(
           isLookingUpFriendCode: false,
@@ -381,22 +377,21 @@ class FriendsNotifier extends StateNotifier<FriendsState> {
         return;
       }
 
-      final lookupResult = FriendCodeLookupResult.fromMap(
-        Map<String, dynamic>.from(userData),
-      );
-
+      final lookupResult = FriendCodeLookupResult.fromMap(userData);
       state = state.copyWith(
         friendCodeLookupResult: lookupResult,
         isLookingUpFriendCode: false,
       );
-    } catch (e) {
-      String errorMessage = 'Failed to look up friend code';
-      if (e is FirebaseFunctionsException) {
-        errorMessage = e.message ?? errorMessage;
-      }
+    } on CloudFnException catch (e) {
       state = state.copyWith(
         isLookingUpFriendCode: false,
-        error: errorMessage,
+        error: e.message ?? 'Failed to look up friend code',
+        clearFriendCodeLookup: true,
+      );
+    } catch (e) {
+      state = state.copyWith(
+        isLookingUpFriendCode: false,
+        error: 'Failed to look up friend code',
         clearFriendCodeLookup: true,
       );
     }
@@ -407,17 +402,18 @@ class FriendsNotifier extends StateNotifier<FriendsState> {
     state = state.copyWith(isLoading: true, error: null);
 
     try {
-      final callable = _functions.httpsCallable('sendFriendRequestByCode');
-      await callable.call({'friendCode': friendCode.toUpperCase()});
-
+      await callFn('sendFriendRequestByCode',
+          {'friendCode': friendCode.toUpperCase()});
       state = state.copyWith(isLoading: false, clearFriendCodeLookup: true);
       return true;
+    } on CloudFnException catch (e) {
+      state = state.copyWith(
+          isLoading: false,
+          error: e.message ?? 'Failed to send friend request');
+      return false;
     } catch (e) {
-      String errorMessage = 'Failed to send friend request';
-      if (e is FirebaseFunctionsException) {
-        errorMessage = e.message ?? errorMessage;
-      }
-      state = state.copyWith(isLoading: false, error: errorMessage);
+      state = state.copyWith(
+          isLoading: false, error: 'Failed to send friend request');
       return false;
     }
   }

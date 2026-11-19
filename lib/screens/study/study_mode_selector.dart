@@ -113,7 +113,7 @@ class _StudyModeSelectorState extends ConsumerState<StudyModeSelector> {
     if (testType == TestType.sat) {
       return [Section.Math, Section.Reading, Section.Writing];
     } else {
-      return [Section.Math, Section.Reading, Section.Writing, Section.Science];
+      return [Section.Math, Section.Reading, Section.English, Section.Science];
     }
   }
 

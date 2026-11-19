@@ -1,12 +1,12 @@
 import 'dart:async';
 
-import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_database/firebase_database.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/battle_model.dart';
 import '../models/question_model.dart';
 import '../providers/auth_provider.dart';
+import '../services/cloud_fn.dart';
 import '../services/firebase_service.dart';
 
 enum BattlePhase { idle, matchmaking, found, playing, finished }
@@ -62,9 +62,6 @@ class BattleState {
 class BattleNotifier extends StateNotifier<BattleState> {
   final Ref _ref;
   final FirebaseDatabase _rtdb = FirebaseDatabase.instance;
-  // Explicitly set region to match Cloud Functions deployment (us-central1)
-  final FirebaseFunctions _functions =
-      FirebaseFunctions.instanceFor(region: 'us-central1');
 
   StreamSubscription? _battleSubscription;
   Timer? _timer;
@@ -76,17 +73,17 @@ class BattleNotifier extends StateNotifier<BattleState> {
     state = state.copyWith(phase: BattlePhase.matchmaking, error: null);
 
     try {
-      final callable = _functions.httpsCallable('joinMatchmaking');
-      final result = await callable.call({'testType': testType});
+      // Use direct HTTP call to bypass Firebase callable SDK's App Check blocker
+      final result = await callFn('joinMatchmaking', {'testType': testType});
 
-      final battleId = result.data['battleId'] as String?;
+      final battleId = (result as Map<String, dynamic>?)?['battleId'] as String?;
       if (battleId != null) {
         _subscribeToBattle(battleId);
       }
-    } on FirebaseFunctionsException catch (e) {
+    } on CloudFnException catch (e) {
       state = state.copyWith(
         phase: BattlePhase.idle,
-        error: _friendlyFunctionsError(e, 'join matchmaking'),
+        error: _friendlyError(e.code, e.message, 'join matchmaking'),
       );
     } catch (e) {
       state = state.copyWith(
@@ -103,20 +100,19 @@ class BattleNotifier extends StateNotifier<BattleState> {
     state = state.copyWith(phase: BattlePhase.matchmaking, error: null);
 
     try {
-      final callable = _functions.httpsCallable('createFriendBattle');
-      final result = await callable.call({
+      final result = await callFn('createFriendBattle', {
         'friendId': friendId,
         'testType': testType,
       });
 
-      final battleId = result.data['battleId'] as String?;
+      final battleId = (result as Map<String, dynamic>?)?['battleId'] as String?;
       if (battleId != null) {
         _subscribeToBattle(battleId);
       }
-    } on FirebaseFunctionsException catch (e) {
+    } on CloudFnException catch (e) {
       state = state.copyWith(
         phase: BattlePhase.idle,
-        error: _friendlyFunctionsError(e, 'start friend battle'),
+        error: _friendlyError(e.code, e.message, 'start friend battle'),
       );
     } catch (e) {
       state = state.copyWith(
@@ -231,17 +227,15 @@ class BattleNotifier extends StateNotifier<BattleState> {
       final userId = _ref.read(currentUserIdProvider);
       if (userId == null) return;
 
-      // Only send answer index - server validates and calculates damage
-      final callable = _functions.httpsCallable('submitBattleAnswer');
-      await callable.call({
+      // Use direct HTTP call — bypasses Firebase callable SDK's App Check blocker
+      await callFn('submitBattleAnswer', {
         'battleId': state.battle!.id,
         'questionIndex': state.battle!.currentQuestionIndex,
         'answer': answer,
-        // damage and selfDamage removed - calculated server-side for security
       });
-    } on FirebaseFunctionsException catch (e) {
-      state =
-          state.copyWith(error: _friendlyFunctionsError(e, 'submit answer'));
+    } on CloudFnException catch (e) {
+      state = state.copyWith(
+          error: _friendlyError(e.code, e.message, 'submit answer'));
     } catch (e) {
       state =
           state.copyWith(error: 'Failed to submit answer. Please try again.');
@@ -257,21 +251,23 @@ class BattleNotifier extends StateNotifier<BattleState> {
     state = const BattleState();
   }
 
-  /// Translates FirebaseFunctionsException into user-friendly messages
-  String _friendlyFunctionsError(FirebaseFunctionsException e, String action) {
-    switch (e.code) {
+  String _friendlyError(String code, String? message, String action) {
+    switch (code) {
+      case 'not_found':
       case 'not-found':
         return 'Game service unavailable. Please make sure the server is running.';
       case 'unauthenticated':
         return 'You must be signed in to $action.';
+      case 'permission_denied':
       case 'permission-denied':
         return 'You do not have permission to $action.';
       case 'unavailable':
         return 'Game service is temporarily unavailable. Please try again later.';
+      case 'deadline_exceeded':
       case 'deadline-exceeded':
         return 'Request timed out. Please check your connection and try again.';
       default:
-        return e.message ?? 'Failed to $action. Please try again.';
+        return message ?? 'Failed to $action. Please try again.';
     }
   }
 
